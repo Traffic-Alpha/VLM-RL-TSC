@@ -2,11 +2,14 @@
 @Author: Pang Aoyu
 @Date: 2023-09-04 20:51:49
 @Description: traffic light control LLM Agent
-LastEditTime: 2024-07-11 13:36:19
+LastEditTime: 2025-01-19 05:23:14
 '''
 import numpy as np
 from typing import List
 from loguru import logger
+from PIL import Image
+import requests
+from io import BytesIO
 
 from langchain_community.chat_models import ChatOpenAI
 from langchain.memory import ConversationTokenBufferMemory
@@ -17,6 +20,11 @@ from langchain.chains.llm import LLMChain   #导入LLM链。
 from langchain.memory import ConversationBufferMemory
 from langchain.output_parsers import ResponseSchema
 from langchain.output_parsers import StructuredOutputParser
+import openai
+import requests
+import base64
+from utils.readConfig import read_config
+# 设置 OpenAI API 密钥
 
 from TSCAssistant.tsc_agent_prompt import SYSTEM_MESSAGE_SUFFIX
 from TSCAssistant.tsc_agent_prompt import (
@@ -37,6 +45,9 @@ class TSCAgent:
         self.llm = llm # ChatGPT Model
         self.tools = [] # agent 可以使用的 tools
         self.state= state
+        config = read_config()
+        self.api_key  = config['OPENAI_API_KEY']
+        openai.api_key = self.api_key
         #self.file_callback = create_file_callback(path_convert('../agent.log'))
         self.first_prompt=ChatPromptTemplate.from_template(   
                     'You can ONLY use one of the following actions: \n action:0 action:1 action:2 action:3'
@@ -64,36 +75,75 @@ class TSCAgent:
                         "Phase 2": ["-E3_s","-E2_s"],
                         "Phase 3": ["-E3_l","-E2_l"],
                     } 
-        self.movement_ids=["E0_s","-E1_s","-E1_l","E0_l","-E3_s","-E2_s","-E3_l","-E2_l"]                   
-    def get_phase(self):
-        phases_4=[[1, 1, 0, 0, 0, 0, 0, 0],
-       [0, 0, 1, 1, 0, 0, 0, 0],
-       [0, 0, 0, 0, 1, 1, 0, 0],
-       [0, 0, 0, 0, 0, 0, 1, 1]]
-        
-        return np.array(phases_4)
-   
-    def get_occupancy(self, states):
-        phase_list=self.get_phase()
-        occupancy=states[:,:,1]
-        occupancy_list=np.zeros(phase_list.shape[0])
-        for i in range(0,phase_list.shape[0]):
-            occupancy_list[i]=(occupancy*phase_list[i]).sum()
+        self.movement_ids=["E0_s","-E1_s","-E1_l","E0_l","-E3_s","-E2_s","-E3_l","-E2_l"]       
+    def image_to_base64(self,image_path):
+        with open(image_path, "rb") as img_file:
+            img_b64 = base64.b64encode(img_file.read()).decode("utf-8")
+        return img_b64            
 
-        occupancy_list=occupancy_list/2
+    def analyze_image_with_gpt(self, prompt, img_url):
+        api_key = self.api_key
+        model = "gpt-4o"  # 你可以使用正确的模型名称
+        url = "https://api.openai.com/v1/chat/completions"
+        img_b64 = self.image_to_base64(img_url)
+        img_data = f"data:image/png;base64,{img_b64}"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
         
-        return occupancy_list
+        # 构建请求的数据体
+        data = {
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": img_data  # 传递图像的 URL
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt  # 传递文本描述
+                        }
+                    ]
+                }
+            ]
+        }
 
-    def get_rescue_movement_ids(self, last_step_vehicle_id_list, movement_ids):
-        """获得当前 Emergency Vehicle 在什么车道上
-        """
-        rescue_movement_ids = []
-        for vehicle_ids, movement_id in zip(last_step_vehicle_id_list, movement_ids):
-            for vehicle_id in vehicle_ids:
-                if 'rescue' in vehicle_id:
-                    rescue_movement_ids.append(movement_id)
-        return rescue_movement_ids
+        # 发送请求到 OpenAI API
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            # 如果请求成功，返回 GPT 的响应内容
+            response_data = response.json()
+            return response_data['choices'][0]['message']['content']
+        
+        else:
+            # 如果请求失败，返回错误信息
+            return f"Error: {response.status_code}, {response.text}"
     
+    def analyze_description(self, description: str) -> str:
+        """
+        使用 GPT 分析图像描述并返回分析结果
+        """
+        response = openai.Completion.create(
+            model="gpt-4",
+            prompt=f"请分析以下图片内容：{description}",
+            max_tokens=100,
+            temperature=0.7
+        )
+        return response['choices'][0]['text'].strip()
+
+
     def agent_run(self, sim_step:float, action:int=0, obs:float=[], infos: list={}):
         """_summary_
 
@@ -106,18 +156,29 @@ class TSCAgent:
         3. 判断动作是否可行
         """
         logger.info(f"SIM: Decision at step {sim_step} is running:")
-        occupancy = self.get_occupancy(obs)
-        Action = action[0]
-        step_time = infos[0]['step_time']
-        step_time=int(step_time)
-        Occupancy=infos[0]['movement_occ']
-        jam_length_meters=infos[0]['jam_length_meters']
-        movement_ids=infos[0]['movement_ids']
-        last_step_vehicle_id_list=infos[0]['last_step_vehicle_id_list']
-        information_missing = infos[0]['information_missing']
-        missing_id = infos[0]['missing_id']
-        rescue_movement_ids=self.get_rescue_movement_ids(last_step_vehicle_id_list,movement_ids)
+        #occupancy = self.get_occupancy(obs)
+        Action = action
+        step_time = sim_step
+        # step_time=int(step_time)
+        #Occupancy=infos[0]['movement_occ']
+        Occupancy = 0
+        #jam_length_meters=infos[0]['jam_length_meters']
+        jam_length_meters = 0
+        #movement_ids=infos[0]['movement_ids']
+        movement_ids = 0
+        #last_step_vehicle_id_list=infos[0]['last_step_vehicle_id_list']
+        last_step_vehicle_id_list = 0 
+        #information_missing = infos[0]['information_missing']
+        information_missing = 0
+        #missing_id = infos[0]['missing_id']
+        missing_id = 0
+        #rescue_movement_ids=self.get_rescue_movement_ids(last_step_vehicle_id_list,movement_ids)
+        rescue_movement_ids = 0
         # 要进行处理 如个存在缺失数值
+        image_path = './sensor_images/sensor_image_0.png'
+        prompt = 'Please Help Me analysize this picture.'
+        #description = self.analyze_image_with_gpt(prompt, image_path)
+        #print('description',description)
         review_template="""
         decision:  Traffic light decision-making judgment  whether the Action is reasonable in the current state.
         explanations: Your explanation about your decision, described your suggestions to the Crossing Guard. The analysis should be as detailed as possible, including the possible benefits of each action.

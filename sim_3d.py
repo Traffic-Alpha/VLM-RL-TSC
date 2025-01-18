@@ -1,7 +1,7 @@
 '''
 Author: Maonan Wang
 Date: 2025-01-13 19:06:10
-LastEditTime: 2025-01-16 22:01:53
+LastEditTime: 2025-01-19 04:45:39
 LastEditors: pangay 1623253042@qq.com
 Description: Run the simulation in 3D and get 
 FilePath: /VLM-TSC/sim_3d.py
@@ -135,7 +135,7 @@ if __name__ == '__main__':
     model_path = path_convert('./models/last_rl_model.zip')
     model = PPO.load(model_path, device=device)
 
-    for _ in range(10):
+    for _ in range(1):
         obs = tshub_env3d.reset()
         done = False
         i_steps = 0
@@ -147,6 +147,9 @@ if __name__ == '__main__':
             obs = _process_obs(state = obs)
             action, _state = model.predict(obs, deterministic=True)
             actions['tls']['J1'] = action
+            # info 信息将直接给 图片信息
+            if i_steps>0:
+                action=tsc_agent.agent_run(sim_step=i_steps, action = int(action), obs=obs, infos=info), #加入 obs wrapper
             obs, reward, info, done, sensor_data = tshub_env3d.step(actions = actions)
             i_steps += 1
 
