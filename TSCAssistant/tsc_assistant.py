@@ -2,7 +2,7 @@
 @Author: Pang Aoyu
 @Date: 2023-09-04 20:51:49
 @Description: traffic light control LLM Agent
-LastEditTime: 2025-01-19 05:23:14
+LastEditTime: 2025-01-19 05:52:45
 '''
 import numpy as np
 from typing import List
@@ -10,6 +10,8 @@ from loguru import logger
 from PIL import Image
 import requests
 from io import BytesIO
+import os
+from openai import OpenAI
 
 from langchain_community.chat_models import ChatOpenAI
 from langchain.memory import ConversationTokenBufferMemory
@@ -24,6 +26,8 @@ import openai
 import requests
 import base64
 from utils.readConfig import read_config
+#from google.cloud import vision
+#from google.cloud.vision import types
 # 设置 OpenAI API 密钥
 
 from TSCAssistant.tsc_agent_prompt import SYSTEM_MESSAGE_SUFFIX
@@ -48,6 +52,8 @@ class TSCAgent:
         config = read_config()
         self.api_key  = config['OPENAI_API_KEY']
         openai.api_key = self.api_key
+        self.client = OpenAI(  api_key = self.api_key,  # This is the default and can be omitted 
+            )
         #self.file_callback = create_file_callback(path_convert('../agent.log'))
         self.first_prompt=ChatPromptTemplate.from_template(   
                     'You can ONLY use one of the following actions: \n action:0 action:1 action:2 action:3'
@@ -80,12 +86,38 @@ class TSCAgent:
         with open(image_path, "rb") as img_file:
             img_b64 = base64.b64encode(img_file.read()).decode("utf-8")
         return img_b64            
+    def get_image_description(self,image_path: str) -> str:
+        """使用 Google Vision API 获取图像描述"""
+        with open(image_path, 'rb') as image_file:
+            content = image_file.read()
 
+        #image = types.Image(content=content)
+        response = self.client.label_detection(image=image)
+        labels = response.label_annotations
+        descriptions = [label.description for label in labels]
+        return ", ".join(descriptions)
+    
     def analyze_image_with_gpt(self, prompt, img_url):
+
         api_key = self.api_key
         model = "gpt-4o"  # 你可以使用正确的模型名称
         url = "https://api.openai.com/v1/chat/completions"
         img_b64 = self.image_to_base64(img_url)
+        response = self.client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{'png'};base64,{img_b64}"},
+                    },
+                ],
+            }
+        ],
+    )
         img_data = f"data:image/png;base64,{img_b64}"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -94,7 +126,7 @@ class TSCAgent:
         
         # 构建请求的数据体
         data = {
-            "model": "gpt-4o",
+            "model": "gpt-4",
             "messages": [
                 {
                     "role": "user",
@@ -177,8 +209,8 @@ class TSCAgent:
         # 要进行处理 如个存在缺失数值
         image_path = './sensor_images/sensor_image_0.png'
         prompt = 'Please Help Me analysize this picture.'
-        #description = self.analyze_image_with_gpt(prompt, image_path)
-        #print('description',description)
+        description = self.analyze_image_with_gpt(prompt, image_path)
+        print('description',description)
         review_template="""
         decision:  Traffic light decision-making judgment  whether the Action is reasonable in the current state.
         explanations: Your explanation about your decision, described your suggestions to the Crossing Guard. The analysis should be as detailed as possible, including the possible benefits of each action.
